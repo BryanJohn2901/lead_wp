@@ -1,0 +1,34 @@
+2026/04/25-23:10:42.505 86ed Reusing MANIFEST /home/johnson/Desktop/Johnson/projetos/lead_wp/lead-hunter/.whatsapp-session/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/25-23:10:42.505 86ed Recovering log #465
+2026/04/25-23:10:42.575 86ed Reusing old log /home/johnson/Desktop/Johnson/projetos/lead_wp/lead-hunter/.whatsapp-session/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000465.log 
+2026/04/25-23:10:49.173 86ec Level-0 table #473: started
+2026/04/25-23:10:49.199 86ec Level-0 table #473: 1153087 bytes OK
+2026/04/25-23:10:49.202 86ec Delete type=0 #465
+2026/04/25-23:10:49.212 86ed Compacting 1@1 + 4@2 files
+2026/04/25-23:10:49.270 86ed Generated table #474@1: 46692 keys, 2212456 bytes
+2026/04/25-23:10:49.290 86ed Generated table #475@1: 2624 keys, 2150203 bytes
+2026/04/25-23:10:49.326 86ed Generated table #476@1: 15962 keys, 2200676 bytes
+2026/04/25-23:10:49.372 86ed Generated table #477@1: 41063 keys, 2021472 bytes
+2026/04/25-23:10:49.372 86ed Compacted 1@1 + 4@2 files => 8584807 bytes
+2026/04/25-23:10:49.376 86ed compacted to: files[ 0 0 4 0 0 0 0 ]
+2026/04/25-23:10:49.376 86ed Delete type=2 #469
+2026/04/25-23:10:49.376 86ed Delete type=2 #473
+2026/04/25-23:10:49.376 86ed Delete type=2 #468
+2026/04/25-23:10:49.376 86ed Delete type=2 #470
+2026/04/25-23:10:49.376 86ed Delete type=2 #467
+2026/04/25-23:11:27.801 86ec Level-0 table #479: started
+2026/04/25-23:11:27.830 86ec Level-0 table #479: 1163212 bytes OK
+2026/04/25-23:11:27.833 86ec Delete type=0 #472
+2026/04/25-23:11:28.811 86ef Compacting 1@1 + 4@2 files
+2026/04/25-23:11:28.871 86ef Generated table #480@1: 47766 keys, 2217151 bytes
+2026/04/25-23:11:28.891 86ef Generated table #481@1: 2615 keys, 2151444 bytes
+2026/04/25-23:11:28.927 86ef Generated table #482@1: 15424 keys, 2198958 bytes
+2026/04/25-23:11:28.980 86ef Generated table #483@1: 48306 keys, 2230920 bytes
+2026/04/25-23:11:28.989 86ef Generated table #484@1: 7295 keys, 222187 bytes
+2026/04/25-23:11:28.989 86ef Compacted 1@1 + 4@2 files => 9020660 bytes
+2026/04/25-23:11:28.993 86ef compacted to: files[ 0 0 5 0 0 0 0 ]
+2026/04/25-23:11:28.993 86ef Delete type=2 #475
+2026/04/25-23:11:28.993 86ef Delete type=2 #474
+2026/04/25-23:11:28.993 86ef Delete type=2 #479
+2026/04/25-23:11:28.993 86ef Delete type=2 #477
+2026/04/25-23:11:28.993 86ef Delete type=2 #476

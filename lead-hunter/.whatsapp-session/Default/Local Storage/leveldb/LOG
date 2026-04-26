@@ -1,0 +1,6 @@
+2026/04/25-23:10:41.732 8716 Reusing MANIFEST /home/johnson/Desktop/Johnson/projetos/lead_wp/lead-hunter/.whatsapp-session/Default/Local Storage/leveldb/MANIFEST-000001
+2026/04/25-23:10:41.738 8716 Recovering log #4
+2026/04/25-23:10:41.738 8716 Reusing old log /home/johnson/Desktop/Johnson/projetos/lead_wp/lead-hunter/.whatsapp-session/Default/Local Storage/leveldb/000004.log 
+2026/04/25-23:11:41.742 8718 Level-0 table #8: started
+2026/04/25-23:11:41.750 8718 Level-0 table #8: 18157 bytes OK
+2026/04/25-23:11:41.754 8718 Delete type=0 #4
