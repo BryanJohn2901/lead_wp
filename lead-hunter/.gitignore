@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+.whatsapp-session/
 
 # debug
 npm-debug.log*
