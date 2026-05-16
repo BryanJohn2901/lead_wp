@@ -103,17 +103,6 @@ export default function Home(): React.JSX.Element {
   const displayedLeads = filterNoWebsite ? leads.filter((l) => !l.hasWebsite) : leads;
   const noWebsiteCount = leads.filter((l) => !l.hasWebsite).length;
 
-  useEffect(() => {
-    if (!sendJobStatus || sendJobStatus.status !== "completed") return;
-    setLeads((prev) =>
-      prev.map((lead) => {
-        const result = sendJobStatus.results.find((r) => r.phone === lead.phone);
-        if (!result) return lead;
-        return { ...lead, sentStatus: result.success ? "sent" : "failed" };
-      }),
-    );
-  }, [sendJobStatus?.status]);
-
   const fetchLeads = async (niche: string, location: string, maxResults: number, append: boolean): Promise<void> => {
     try {
       setIsLoading(true);
@@ -257,7 +246,17 @@ export default function Home(): React.JSX.Element {
         if (!response.ok || cancelled) return;
         const job = data as WhatsappSendJobStatus;
         setSendJobStatus(job);
-        if (job.status === "completed") { setWhatsappStatus(`Envio concluído: ${job.sent} enviados, ${job.failed} falhas.`); return; }
+        if (job.status === "completed") {
+          setWhatsappStatus(`Envio concluído: ${job.sent} enviados, ${job.failed} falhas.`);
+          setLeads((prev) =>
+            prev.map((lead) => {
+              const result = job.results.find((r) => r.phone === lead.phone);
+              if (!result) return lead;
+              return { ...lead, sentStatus: result.success ? "sent" : "failed" };
+            }),
+          );
+          return;
+        }
         if (job.status === "failed") { const msg = job.error ?? "Falha no envio."; setWhatsappStatus(msg); alert(msg); return; }
         if (!cancelled) window.setTimeout(poll, 1_500);
       } catch {

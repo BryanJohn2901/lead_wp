@@ -469,6 +469,10 @@ async function runSendJob(
 export async function PATCH(
   request: Request,
 ): Promise<NextResponse<{ ok: boolean } | ErrorResponse>> {
+  if (process.env.VERCEL) {
+    return NextResponse.json(VERCEL_ENV_ERROR, { status: 503 });
+  }
+
   const body = (await request.json()) as { jobId?: string; action?: string };
   const { jobId, action } = body;
 
@@ -499,6 +503,10 @@ export async function PATCH(
 export async function GET(
   request: Request,
 ): Promise<NextResponse<StoredJob | WhatsappConnectionStatusResponse | ErrorResponse>> {
+  if (process.env.VERCEL) {
+    return NextResponse.json(VERCEL_ENV_ERROR, { status: 503 });
+  }
+
   const url = new URL(request.url);
   const jobId = url.searchParams.get("jobId");
 
@@ -525,9 +533,18 @@ export async function GET(
   }
 }
 
+const VERCEL_ENV_ERROR: ErrorResponse = {
+  error:
+    "O envio via WhatsApp requer um servidor dedicado com interface gráfica e armazenamento persistente. Esta funcionalidade não é compatível com ambientes serverless (Vercel). Hospede a aplicação localmente ou em um VPS para usar o disparo via WhatsApp.",
+};
+
 export async function POST(
   request: Request,
 ): Promise<NextResponse<SendWhatsappStartResponse | ErrorResponse>> {
+  if (process.env.VERCEL) {
+    return NextResponse.json(VERCEL_ENV_ERROR, { status: 503 });
+  }
+
   const body = (await request.json()) as Partial<SendWhatsappRequest>;
   const message = body.message?.trim() ?? "";
   const incomingNumbers = Array.isArray(body.numbers) ? body.numbers : [];

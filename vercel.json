@@ -1,0 +1,11 @@
+{
+  "buildCommand": "npx playwright install chromium --with-deps && next build",
+  "functions": {
+    "src/app/api/scraper/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/whatsapp/send/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}
