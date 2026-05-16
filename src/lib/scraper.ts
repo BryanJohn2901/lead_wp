@@ -5,9 +5,9 @@ const DEFAULT_MAX_RESULTS = 30;
 // Captures formats: (11) 99876-5432 | (11) 9 9876-5432 | 11 9876-5432 | 11998765432
 const PHONE_REGEX = /\(?\d{2}\)?\s?\d?\s?\d{4}[-\s]?\d{4}/;
 
-// sparticuz/chromium pack compatible with playwright 1.59.x (Chromium 147/148)
+// sparticuz/chromium x64 pack compatible with playwright 1.59.x (Chromium 147/148)
 const CHROMIUM_PACK_URL =
-  "https://github.com/Sparticuz/chromium/releases/download/v148.0.0/chromium-v148.0.0-pack.tar";
+  "https://github.com/Sparticuz/chromium/releases/download/v148.0.0/chromium-v148.0.0-pack.x64.tar";
 
 function getMaxResultsFromEnv(): number {
   const parsed = Number(process.env.SCRAPER_MAX_RESULTS);

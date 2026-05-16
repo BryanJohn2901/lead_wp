@@ -62,9 +62,10 @@ export async function POST(
       discarded,
     });
   } catch (error: unknown) {
-    console.error("Erro na rota /api/scraper:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Erro na rota /api/scraper:", message);
     return NextResponse.json(
-      { error: "Falha ao processar scraping de leads." },
+      { error: `Falha ao processar scraping de leads: ${message}` },
       { status: 500 },
     );
   }
