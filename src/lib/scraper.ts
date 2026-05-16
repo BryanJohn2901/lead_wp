@@ -5,6 +5,10 @@ const DEFAULT_MAX_RESULTS = 30;
 // Captures formats: (11) 99876-5432 | (11) 9 9876-5432 | 11 9876-5432 | 11998765432
 const PHONE_REGEX = /\(?\d{2}\)?\s?\d?\s?\d{4}[-\s]?\d{4}/;
 
+// sparticuz/chromium pack compatible with playwright 1.59.x (Chromium 147/148)
+const CHROMIUM_PACK_URL =
+  "https://github.com/Sparticuz/chromium/releases/download/v148.0.0/chromium-v148.0.0-pack.tar";
+
 function getMaxResultsFromEnv(): number {
   const parsed = Number(process.env.SCRAPER_MAX_RESULTS);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -13,12 +17,27 @@ function getMaxResultsFromEnv(): number {
   return Math.floor(parsed);
 }
 
+async function getLaunchOptions(): Promise<Parameters<typeof chromium.launch>[0]> {
+  if (process.env.VERCEL) {
+    // On Vercel (Amazon Linux / Lambda): use a pre-built serverless Chromium binary
+    // that downloads to /tmp on first cold start and is cached for warm starts.
+    const chromiumLambda = (await import("@sparticuz/chromium-min")).default;
+    return {
+      args: chromiumLambda.args,
+      executablePath: await chromiumLambda.executablePath(CHROMIUM_PACK_URL),
+      headless: true,
+    };
+  }
+  return { headless: true };
+}
+
 export async function scrapeGoogleMaps(
   niche: string,
   location: string,
   maxResultsOverride?: number,
 ): Promise<RawLead[]> {
-  const browser = await chromium.launch({ headless: true });
+  const launchOptions = await getLaunchOptions();
+  const browser = await chromium.launch(launchOptions);
   const maxResults =
     typeof maxResultsOverride === "number" && Number.isFinite(maxResultsOverride)
       ? Math.max(1, Math.floor(maxResultsOverride))
