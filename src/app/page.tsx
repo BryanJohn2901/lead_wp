@@ -29,6 +29,7 @@ interface WhatsappSendJobStatus {
   connectedName: string | null;
   connectedNumber: string | null;
   waitingQrScan: boolean;
+  qrCode: string | null;
   paused: boolean;
   stopRequested: boolean;
   results: Array<{
@@ -202,7 +203,7 @@ export default function Home(): React.JSX.Element {
     if (!messageText.trim()) { setWhatsappStatus("Escreva a mensagem antes de enviar."); return; }
     try {
       setIsSendingWhatsapp(true);
-      setWhatsappStatus("Abrindo WhatsApp e iniciando disparos...");
+      setWhatsappStatus("Conectando com a Evolution API...");
       setSendJobStatus(null);
       setSendJobId(null);
       const response = await fetch("/api/whatsapp/send", {
@@ -512,9 +513,25 @@ export default function Home(): React.JSX.Element {
               </div>
 
               {sendJobStatus.waitingQrScan ? (
-                <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">
-                  Aguardando leitura do QR Code na janela do WhatsApp...
-                </p>
+                <div className="flex flex-col items-center gap-2">
+                  {sendJobStatus.qrCode ? (
+                    <>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={sendJobStatus.qrCode}
+                        alt="QR Code WhatsApp"
+                        className="h-48 w-48 rounded-xl border border-zinc-200 dark:border-zinc-700"
+                      />
+                      <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">
+                        Escaneie o QR Code com o WhatsApp para conectar
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">
+                      Aguardando QR Code da Evolution API...
+                    </p>
+                  )}
+                </div>
               ) : null}
               {isJobPaused ? (
                 <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">Envio pausado.</p>

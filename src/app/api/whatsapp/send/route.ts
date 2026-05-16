@@ -1,15 +1,17 @@
-import path from "node:path";
-import { chromium } from "playwright";
 import { NextResponse } from "next/server";
 import { normalizePhone } from "@/lib/phone";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-interface SendWhatsappRequest {
-  numbers: string[];
-  message: string;
-}
+const EVOLUTION_URL = process.env.EVOLUTION_API_URL?.replace(/\/$/, "") ?? "";
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY ?? "";
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_API_INSTANCE ?? "lead-hunter";
+
+const MESSAGE_INTERVAL_MS = 15_000;
+const QR_SCAN_TIMEOUT_MS = 120_000;
+const QR_SCAN_POLL_MS = 3_000;
+const MAX_STORED_JOBS = 20;
 
 interface SendResultItem {
   phone: string;
@@ -17,11 +19,7 @@ interface SendResultItem {
   reason?: string;
 }
 
-interface SendWhatsappStartResponse {
-  jobId: string;
-}
-
-interface SendWhatsappJobStatus {
+export interface SendJobStatus {
   jobId: string;
   status: "pending_qr" | "running" | "completed" | "failed";
   total: number;
@@ -35,70 +33,114 @@ interface SendWhatsappJobStatus {
   connectedName: string | null;
   connectedNumber: string | null;
   waitingQrScan: boolean;
+  qrCode: string | null;
   paused: boolean;
   stopRequested: boolean;
   results: SendResultItem[];
   error?: string;
 }
 
-interface WhatsappConnectionStatusResponse {
-  whatsappConnected: boolean;
-  connectedName: string | null;
-  connectedNumber: string | null;
-}
-
 interface ErrorResponse {
   error: string;
 }
 
-const MESSAGE_INTERVAL_MS = 15_000;
-const QR_SCAN_TIMEOUT_MS = 120_000;
-const QR_SCAN_POLL_MS = 2_000;
-const MAX_STORED_JOBS = 20;
-
-// Stable selectors for WhatsApp Web — listed most-specific first for reliability
-const CHAT_LIST_SELECTOR = [
-  "div[data-testid='chat-list']",
-  "div[aria-label='Lista de conversas']",
-  "div[aria-label='Chat list']",
-  "div[contenteditable='true'][data-tab='3']",
-  "div[aria-label='Pesquisar ou começar uma nova conversa']",
-  "div[aria-label='Search or start new chat']",
-].join(", ");
-
-const QR_CODE_SELECTOR = [
-  "[data-testid='qrcode']",
-  "[data-testid='qr-code']",
-  "canvas[aria-label*='Scan']",
-  "canvas[aria-label*='scan']",
-  "div[data-ref]", // WhatsApp internal QR container
-].join(", ");
-
-const MESSAGE_COMPOSER_SELECTOR = [
-  "div[data-testid='conversation-compose-box-input']",
-  "div[aria-label='Digite uma mensagem'][contenteditable='true']",
-  "div[aria-label='Type a message'][contenteditable='true']",
-  "footer div[contenteditable='true']",
-  "div[contenteditable='true'][data-tab='10']",
-  "div[contenteditable='true'][data-tab='6']",
-  "div[contenteditable='true'][role='textbox']",
-].join(", ");
-
-const SEND_BUTTON_SELECTOR = [
-  "button[data-testid='compose-btn-send']",
-  "button[aria-label='Enviar']",
-  "button[aria-label='Send']",
-].join(", ");
-
-type StoredJob = SendWhatsappJobStatus;
-
 const globalState = globalThis as typeof globalThis & {
-  __leadHunterWhatsappJobs?: Map<string, StoredJob>;
-  __leadHunterBrowserBusy?: boolean;
+  __leadHunterJobs?: Map<string, SendJobStatus>;
 };
+const jobs = globalState.__leadHunterJobs ?? new Map<string, SendJobStatus>();
+globalState.__leadHunterJobs = jobs;
 
-const jobs = globalState.__leadHunterWhatsappJobs ?? new Map<string, StoredJob>();
-globalState.__leadHunterWhatsappJobs = jobs;
+// ── Evolution API helpers ──────────────────────────────────────────────────
+
+function evolutionFetch(path: string, init?: RequestInit): Promise<Response> {
+  if (!EVOLUTION_URL) throw new Error("EVOLUTION_API_URL não configurado.");
+  return fetch(`${EVOLUTION_URL}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      apikey: EVOLUTION_KEY,
+      ...(init?.headers ?? {}),
+    },
+  });
+}
+
+async function ensureInstance(): Promise<void> {
+  const res = await evolutionFetch("/instance/fetchInstances");
+  if (!res.ok) throw new Error("Falha ao consultar instâncias da Evolution API.");
+  const list = (await res.json()) as Array<{ instanceName: string }>;
+  const exists = list.some((i) => i.instanceName === EVOLUTION_INSTANCE);
+  if (!exists) {
+    const create = await evolutionFetch("/instance/create", {
+      method: "POST",
+      body: JSON.stringify({ instanceName: EVOLUTION_INSTANCE, qrcode: true }),
+    });
+    if (!create.ok) throw new Error("Falha ao criar instância da Evolution API.");
+  }
+}
+
+async function getConnectionState(): Promise<"open" | "connecting" | "close"> {
+  try {
+    const res = await evolutionFetch(`/instance/connectionState/${EVOLUTION_INSTANCE}`);
+    if (!res.ok) return "close";
+    const data = (await res.json()) as { instance?: { state?: string }; state?: string };
+    return (data.instance?.state ?? data.state ?? "close") as "open" | "connecting" | "close";
+  } catch {
+    return "close";
+  }
+}
+
+async function fetchQrCode(): Promise<string | null> {
+  try {
+    const res = await evolutionFetch(`/instance/connect/${EVOLUTION_INSTANCE}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { base64?: string; qrcode?: { base64?: string } };
+    return data.base64 ?? data.qrcode?.base64 ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function getConnectedIdentity(): Promise<{ connectedName: string | null; connectedNumber: string | null }> {
+  try {
+    const res = await evolutionFetch("/instance/fetchInstances");
+    if (!res.ok) return { connectedName: null, connectedNumber: null };
+    const list = (await res.json()) as Array<{
+      instanceName: string;
+      profileName?: string;
+      ownerJid?: string;
+    }>;
+    const inst = list.find((i) => i.instanceName === EVOLUTION_INSTANCE);
+    if (!inst) return { connectedName: null, connectedNumber: null };
+    return {
+      connectedName: inst.profileName ?? null,
+      connectedNumber: inst.ownerJid ? `+${inst.ownerJid.replace(/@.*$/, "")}` : null,
+    };
+  } catch {
+    return { connectedName: null, connectedNumber: null };
+  }
+}
+
+async function sendText(
+  phone: string,
+  text: string,
+): Promise<{ success: boolean; reason?: string }> {
+  try {
+    const number = phone.replace("+", "");
+    const res = await evolutionFetch(`/message/sendText/${EVOLUTION_INSTANCE}`, {
+      method: "POST",
+      body: JSON.stringify({ number, text }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      return { success: false, reason: body.error ?? body.message ?? `HTTP ${res.status}` };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: err instanceof Error ? err.message : "Erro inesperado" };
+  }
+}
+
+// ── Job helpers ───────────────────────────────────────────────────────────
 
 function createJobId(): string {
   return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -106,500 +148,192 @@ function createJobId(): string {
 
 function compactJobs(): void {
   if (jobs.size <= MAX_STORED_JOBS) return;
-
-  const completed = Array.from(jobs.values()).filter(
-    (job) => job.status === "completed" || job.status === "failed",
-  );
-  completed.sort((a, b) => a.jobId.localeCompare(b.jobId));
-
-  while (jobs.size > MAX_STORED_JOBS && completed.length) {
-    const old = completed.shift();
+  const done = Array.from(jobs.values())
+    .filter((j) => j.status === "completed" || j.status === "failed")
+    .sort((a, b) => a.jobId.localeCompare(b.jobId));
+  while (jobs.size > MAX_STORED_JOBS && done.length) {
+    const old = done.shift();
     if (old) jobs.delete(old.jobId);
   }
 }
 
-function extractConnectedNumberFromStorage(rawValues: string[]): string | null {
-  for (const raw of rawValues) {
-    const match = raw.match(/(\d{10,15})@s\.whatsapp\.net/);
-    if (match?.[1]) return `+${match[1]}`;
-  }
-  return null;
-}
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function checkInvalidNumber(page: import("playwright").Page): Promise<boolean> {
-  const phrases = [
-    "número de telefone compartilhado através de url é inválido",
-    "phone number shared via url is invalid",
-  ];
-  for (const phrase of phrases) {
-    const visible = await page
-      .getByText(phrase, { exact: false })
-      .first()
-      .isVisible()
-      .catch(() => false);
-    if (visible) return true;
-  }
-  return false;
-}
+// ── Background job ────────────────────────────────────────────────────────
 
-async function getConnectedIdentity(
-  page: import("playwright").Page,
-): Promise<{ connectedName: string | null; connectedNumber: string | null }> {
-  // Get name from the profile/header area, excluding generic labels
-  const connectedName = await page
-    .locator("header button[aria-label] span[title], header span[data-testid='conversation-info-header-chat-title']")
-    .first()
-    .getAttribute("title")
-    .catch(() => null)
-    .then((title) => {
-      const cleaned = title?.trim() ?? null;
-      if (!cleaned || cleaned === "Perfil" || cleaned === "Profile") return null;
-      return cleaned;
-    });
-
-  const connectedNumber = await page
-    .evaluate(() => {
-      const values = Object.values(window.localStorage ?? {});
-      return values
-        .filter((value): value is string => typeof value === "string")
-        .slice(0, 500);
-    })
-    .then((values) => extractConnectedNumberFromStorage(values))
-    .catch(() => null);
-
-  return { connectedName, connectedNumber };
-}
-
-async function isWhatsappLoggedIn(page: import("playwright").Page): Promise<boolean> {
-  // If QR code is visible → definitely not logged in
-  const qrCodeVisible = await page
-    .locator(QR_CODE_SELECTOR)
-    .first()
-    .isVisible()
-    .catch(() => false);
-  if (qrCodeVisible) return false;
-
-  // If chat list is visible → logged in
-  return page
-    .locator(CHAT_LIST_SELECTOR)
-    .first()
-    .isVisible()
-    .catch(() => false);
-}
-
-async function waitForWhatsappLogin(page: import("playwright").Page): Promise<boolean> {
-  const start = Date.now();
-
-  while (Date.now() - start < QR_SCAN_TIMEOUT_MS) {
-    if (page.isClosed()) return false;
-
-    const loggedIn = await isWhatsappLoggedIn(page);
-    if (loggedIn) return true;
-
-    try {
-      await page.waitForTimeout(QR_SCAN_POLL_MS);
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
-}
-
-async function resolveConnectionStatus(
-  openWindow: boolean,
-): Promise<WhatsappConnectionStatusResponse> {
-  // If a job is actively running, derive status from it to avoid browser conflict
-  const activeJob = Array.from(jobs.values()).find(
-    (job) => job.status === "pending_qr" || job.status === "running",
-  );
-  if (activeJob) {
-    return {
-      whatsappConnected: activeJob.whatsappConnected,
-      connectedName: activeJob.connectedName,
-      connectedNumber: activeJob.connectedNumber,
-    };
-  }
-
-  if (globalState.__leadHunterBrowserBusy) {
-    return { whatsappConnected: false, connectedName: null, connectedNumber: null };
-  }
-
-  const userDataDir = path.join(process.cwd(), ".whatsapp-session");
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: !openWindow,
-    locale: "pt-BR",
-    viewport: { width: 1400, height: 900 },
-  });
+async function runSendJob(jobId: string, numbers: string[], message: string): Promise<void> {
+  const fail = (error: string): void => {
+    const j = jobs.get(jobId);
+    if (j) { j.status = "failed"; j.error = error; j.currentPhone = null; jobs.set(jobId, j); }
+  };
 
   try {
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto("https://web.whatsapp.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 45_000,
-    });
-
-    const loggedIn = await waitForWhatsappLogin(page);
-    if (!loggedIn) {
-      return { whatsappConnected: false, connectedName: null, connectedNumber: null };
-    }
-
-    const identity = await getConnectedIdentity(page);
-    return {
-      whatsappConnected: true,
-      connectedName: identity.connectedName,
-      connectedNumber: identity.connectedNumber,
-    };
-  } finally {
-    await context.close();
-  }
-}
-
-async function runSendJob(
-  jobId: string,
-  normalizedNumbers: string[],
-  message: string,
-): Promise<void> {
-  globalState.__leadHunterBrowserBusy = true;
-
-  const userDataDir = path.join(process.cwd(), ".whatsapp-session");
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    locale: "pt-BR",
-    viewport: { width: 1400, height: 900 },
-  });
-
-  try {
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto("https://web.whatsapp.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 45_000,
-    });
-
-    const job = jobs.get(jobId);
-    if (!job) return;
-
-    job.status = "pending_qr";
-    job.waitingQrScan = true;
-    job.paused = false;
-    job.stopRequested = false;
-    jobs.set(jobId, job);
-
-    const loggedIn = await waitForWhatsappLogin(page);
-    if (!loggedIn) {
-      job.status = "failed";
-      job.error =
-        "WhatsApp não autenticado. Escaneie o QR Code (tempo limite: 2 minutos) e tente novamente.";
-      job.waitingQrScan = false;
-      jobs.set(jobId, job);
-      return;
-    }
-
-    const identity = await getConnectedIdentity(page);
-    job.whatsappConnected = true;
-    job.connectedName = identity.connectedName;
-    job.connectedNumber = identity.connectedNumber;
-    job.waitingQrScan = false;
-    job.status = "running";
-    jobs.set(jobId, job);
-
-    for (const [index, normalized] of normalizedNumbers.entries()) {
-      // --- Pause / Stop gate ---
-      while (true) {
-        const ctrl = jobs.get(jobId);
-        if (!ctrl || ctrl.stopRequested) {
-          job.status = "completed";
-          job.currentPhone = null;
-          jobs.set(jobId, job);
-          return;
-        }
-        if (!ctrl.paused) break;
-        await page.waitForTimeout(500).catch(() => {});
-      }
-      // -------------------------
-
-      job.current = index + 1;
-      job.currentPhone = normalized;
-      jobs.set(jobId, job);
-
-      if (page.isClosed()) {
-        job.status = "failed";
-        job.error = "A janela do WhatsApp foi fechada durante o envio.";
-        job.currentPhone = null;
-        jobs.set(jobId, job);
-        return;
-      }
-
-      const phone = normalized.replace("+", "");
-      try {
-        await page.goto(
-          `https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(message)}`,
-          { waitUntil: "domcontentloaded", timeout: 45_000 },
-        );
-
-        // Wait for message composer or invalid-number dialog — whichever appears first
-        const messageComposer = page.locator(MESSAGE_COMPOSER_SELECTOR).first();
-        let composerReady = false;
-
-        try {
-          await messageComposer.waitFor({ state: "visible", timeout: 25_000 });
-          composerReady = true;
-        } catch {
-          // Timeout — check if an invalid number dialog appeared instead
-        }
-
-        if (!composerReady) {
-          const invalid = await checkInvalidNumber(page);
-          if (invalid) {
-            job.results.push({
-              phone: normalized,
-              success: false,
-              reason: "Número inválido no WhatsApp",
-            });
-            job.failed += 1;
-            job.processed += 1;
-            job.remaining = Math.max(job.total - job.processed, 0);
-            jobs.set(jobId, job);
-            continue;
-          }
-
-          // Try a page reload once before giving up
-          try {
-            await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-            await messageComposer.waitFor({ state: "visible", timeout: 15_000 });
-            composerReady = true;
-          } catch {
-            throw new Error("Timeout: não foi possível abrir a conversa.");
-          }
-        }
-
-        // Double-check: invalid number dialog might appear after the composer times out and we reload
-        if (await checkInvalidNumber(page)) {
-          job.results.push({
-            phone: normalized,
-            success: false,
-            reason: "Número inválido no WhatsApp",
-          });
-          job.failed += 1;
-          job.processed += 1;
-          job.remaining = Math.max(job.total - job.processed, 0);
-          jobs.set(jobId, job);
-          continue;
-        }
-
-        // Try the send button first; fall back to Enter if it's not found
-        const sendButton = page.locator(SEND_BUTTON_SELECTOR).first();
-        let buttonReady = false;
-        try {
-          await sendButton.waitFor({ state: "visible", timeout: 5_000 });
-          buttonReady = true;
-        } catch {
-          buttonReady = false;
-        }
-
-        if (buttonReady) {
-          await sendButton.click();
-        } else {
-          await messageComposer.click();
-          await page.keyboard.press("Enter");
-        }
-
-        // Brief wait to allow the message to be delivered
-        await page.waitForTimeout(1_500);
-
-        job.results.push({ phone: normalized, success: true });
-        job.sent += 1;
-      } catch (error: unknown) {
-        job.results.push({
-          phone: normalized,
-          success: false,
-          reason: error instanceof Error ? error.message : "Erro inesperado",
-        });
-        job.failed += 1;
-      }
-
-      job.processed += 1;
-      job.remaining = Math.max(job.total - job.processed, 0);
-      jobs.set(jobId, job);
-
-      const hasNextNumber = index < normalizedNumbers.length - 1;
-      if (hasNextNumber) {
-        // Poll in 500ms steps so pause/stop are respected during the interval
-        const POLL_MS = 500;
-        let elapsed = 0;
-        while (elapsed < MESSAGE_INTERVAL_MS) {
-          if (page.isClosed()) {
-            job.status = "failed";
-            job.error = "A janela do WhatsApp foi fechada durante o envio.";
-            job.currentPhone = null;
-            jobs.set(jobId, job);
-            return;
-          }
-          const ctrl = jobs.get(jobId);
-          if (!ctrl || ctrl.stopRequested) {
-            job.status = "completed";
-            job.currentPhone = null;
-            jobs.set(jobId, job);
-            return;
-          }
-          await page.waitForTimeout(POLL_MS).catch(() => {});
-          if (!ctrl.paused) elapsed += POLL_MS; // timer pauses when job is paused
-        }
-      }
-    }
-
-    job.status = "completed";
-    job.currentPhone = null;
-    job.current = job.total;
-    jobs.set(jobId, job);
-  } catch (error: unknown) {
-    const job = jobs.get(jobId);
-    if (job) {
-      job.status = "failed";
-      job.error = error instanceof Error ? error.message : "Erro inesperado no envio";
-      job.currentPhone = null;
-      jobs.set(jobId, job);
-    }
-  } finally {
-    globalState.__leadHunterBrowserBusy = false;
-    await context.close();
-  }
-}
-
-export async function PATCH(
-  request: Request,
-): Promise<NextResponse<{ ok: boolean } | ErrorResponse>> {
-  if (process.env.VERCEL) {
-    return NextResponse.json(VERCEL_ENV_ERROR, { status: 503 });
-  }
-
-  const body = (await request.json()) as { jobId?: string; action?: string };
-  const { jobId, action } = body;
-
-  if (!jobId || !action) {
-    return NextResponse.json({ error: "jobId e action são obrigatórios." }, { status: 400 });
+    await ensureInstance();
+  } catch (err) {
+    fail(err instanceof Error ? err.message : "Erro ao inicializar instância.");
+    return;
   }
 
   const job = jobs.get(jobId);
-  if (!job) {
-    return NextResponse.json({ error: "Job não encontrado." }, { status: 404 });
-  }
+  if (!job) return;
 
-  if (action === "stop") {
-    job.stopRequested = true;
-    job.paused = false;
-  } else if (action === "pause") {
-    job.paused = true;
-  } else if (action === "resume") {
-    job.paused = false;
-  } else {
-    return NextResponse.json({ error: "Action inválida." }, { status: 400 });
-  }
-
+  // Wait for QR scan / reconnection
+  job.status = "pending_qr";
+  job.waitingQrScan = true;
   jobs.set(jobId, job);
-  return NextResponse.json({ ok: true });
+
+  const deadline = Date.now() + QR_SCAN_TIMEOUT_MS;
+  let connected = false;
+
+  while (Date.now() < deadline) {
+    if ((await getConnectionState()) === "open") { connected = true; break; }
+    job.qrCode = await fetchQrCode();
+    jobs.set(jobId, job);
+    await sleep(QR_SCAN_POLL_MS);
+  }
+
+  if (!connected) {
+    fail("WhatsApp não autenticado. Escaneie o QR Code (limite: 2 minutos) e tente novamente.");
+    job.waitingQrScan = false;
+    job.qrCode = null;
+    jobs.set(jobId, job);
+    return;
+  }
+
+  const identity = await getConnectedIdentity();
+  job.whatsappConnected = true;
+  job.connectedName = identity.connectedName;
+  job.connectedNumber = identity.connectedNumber;
+  job.waitingQrScan = false;
+  job.qrCode = null;
+  job.status = "running";
+  jobs.set(jobId, job);
+
+  for (const [index, phone] of numbers.entries()) {
+    // Pause / stop gate
+    for (;;) {
+      const ctrl = jobs.get(jobId);
+      if (!ctrl || ctrl.stopRequested) {
+        job.status = "completed"; job.currentPhone = null; jobs.set(jobId, job); return;
+      }
+      if (!ctrl.paused) break;
+      await sleep(500);
+    }
+
+    job.current = index + 1;
+    job.currentPhone = phone;
+    jobs.set(jobId, job);
+
+    const result = await sendText(phone, message);
+
+    if (result.success) {
+      job.results.push({ phone, success: true });
+      job.sent += 1;
+    } else {
+      job.results.push({ phone, success: false, reason: result.reason });
+      job.failed += 1;
+    }
+
+    job.processed += 1;
+    job.remaining = Math.max(job.total - job.processed, 0);
+    jobs.set(jobId, job);
+
+    if (index < numbers.length - 1) {
+      let elapsed = 0;
+      while (elapsed < MESSAGE_INTERVAL_MS) {
+        const ctrl = jobs.get(jobId);
+        if (!ctrl || ctrl.stopRequested) {
+          job.status = "completed"; job.currentPhone = null; jobs.set(jobId, job); return;
+        }
+        await sleep(500);
+        if (ctrl && !ctrl.paused) elapsed += 500;
+      }
+    }
+  }
+
+  job.status = "completed";
+  job.currentPhone = null;
+  job.current = job.total;
+  jobs.set(jobId, job);
 }
+
+// ── HTTP handlers ─────────────────────────────────────────────────────────
 
 export async function GET(
   request: Request,
-): Promise<NextResponse<StoredJob | WhatsappConnectionStatusResponse | ErrorResponse>> {
-  if (process.env.VERCEL) {
-    return NextResponse.json(VERCEL_ENV_ERROR, { status: 503 });
-  }
-
-  const url = new URL(request.url);
-  const jobId = url.searchParams.get("jobId");
-
-  if (jobId) {
-    const job = jobs.get(jobId);
-    if (!job) return NextResponse.json({ error: "Job não encontrado." }, { status: 404 });
-    return NextResponse.json(job);
-  }
-
-  try {
-    const openWindow = url.searchParams.get("open") === "1";
-    const status = await resolveConnectionStatus(openWindow);
-    return NextResponse.json(status);
-  } catch (error: unknown) {
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Falha ao consultar status do WhatsApp.",
-      },
-      { status: 500 },
-    );
-  }
+): Promise<NextResponse<SendJobStatus | ErrorResponse>> {
+  const jobId = new URL(request.url).searchParams.get("jobId");
+  if (!jobId) return NextResponse.json({ error: "Parâmetro jobId é obrigatório." }, { status: 400 });
+  const job = jobs.get(jobId);
+  if (!job) return NextResponse.json({ error: "Job não encontrado." }, { status: 404 });
+  return NextResponse.json(job);
 }
-
-const VERCEL_ENV_ERROR: ErrorResponse = {
-  error:
-    "O envio via WhatsApp requer um servidor dedicado com interface gráfica e armazenamento persistente. Esta funcionalidade não é compatível com ambientes serverless (Vercel). Hospede a aplicação localmente ou em um VPS para usar o disparo via WhatsApp.",
-};
 
 export async function POST(
   request: Request,
-): Promise<NextResponse<SendWhatsappStartResponse | ErrorResponse>> {
-  if (process.env.VERCEL) {
-    return NextResponse.json(VERCEL_ENV_ERROR, { status: 503 });
+): Promise<NextResponse<{ jobId: string } | ErrorResponse>> {
+  if (!EVOLUTION_URL) {
+    return NextResponse.json(
+      { error: "EVOLUTION_API_URL não configurado. Defina a variável de ambiente com a URL da sua Evolution API." },
+      { status: 503 },
+    );
   }
 
-  const body = (await request.json()) as Partial<SendWhatsappRequest>;
+  const body = (await request.json()) as Partial<{ numbers: string[]; message: string }>;
   const message = body.message?.trim() ?? "";
-  const incomingNumbers = Array.isArray(body.numbers) ? body.numbers : [];
+  const incoming = Array.isArray(body.numbers) ? body.numbers : [];
 
-  if (!message) {
-    return NextResponse.json(
-      { error: "Mensagem obrigatória para envio." },
-      { status: 400 },
-    );
-  }
+  if (!message) return NextResponse.json({ error: "Mensagem obrigatória para envio." }, { status: 400 });
+  if (!incoming.length) return NextResponse.json({ error: "Informe ao menos um número para envio." }, { status: 400 });
 
-  if (!incomingNumbers.length) {
-    return NextResponse.json(
-      { error: "Informe ao menos um número para envio." },
-      { status: 400 },
-    );
-  }
-
-  const normalizedNumbers = Array.from(
-    new Set(
-      incomingNumbers
-        .map((phone) => normalizePhone(phone))
-        .filter((phone): phone is string => Boolean(phone)),
-    ),
+  const normalized = Array.from(
+    new Set(incoming.map((p) => normalizePhone(p)).filter((p): p is string => Boolean(p))),
   );
-
-  if (!normalizedNumbers.length) {
-    return NextResponse.json(
-      { error: "Nenhum número válido após normalização." },
-      { status: 400 },
-    );
-  }
+  if (!normalized.length) return NextResponse.json({ error: "Nenhum número válido após normalização." }, { status: 400 });
 
   const jobId = createJobId();
   jobs.set(jobId, {
     jobId,
     status: "pending_qr",
-    total: normalizedNumbers.length,
+    total: normalized.length,
     processed: 0,
     sent: 0,
     failed: 0,
-    remaining: normalizedNumbers.length,
+    remaining: normalized.length,
     current: 0,
     currentPhone: null,
     whatsappConnected: false,
     connectedName: null,
     connectedNumber: null,
     waitingQrScan: true,
+    qrCode: null,
     paused: false,
     stopRequested: false,
     results: [],
   });
   compactJobs();
 
-  void runSendJob(jobId, normalizedNumbers, message);
+  void runSendJob(jobId, normalized, message);
 
   return NextResponse.json({ jobId });
+}
+
+export async function PATCH(
+  request: Request,
+): Promise<NextResponse<{ ok: boolean } | ErrorResponse>> {
+  const body = (await request.json()) as { jobId?: string; action?: string };
+  const { jobId, action } = body;
+
+  if (!jobId || !action) return NextResponse.json({ error: "jobId e action são obrigatórios." }, { status: 400 });
+
+  const job = jobs.get(jobId);
+  if (!job) return NextResponse.json({ error: "Job não encontrado." }, { status: 404 });
+
+  if (action === "stop") { job.stopRequested = true; job.paused = false; }
+  else if (action === "pause") { job.paused = true; }
+  else if (action === "resume") { job.paused = false; }
+  else return NextResponse.json({ error: "Action inválida." }, { status: 400 });
+
+  jobs.set(jobId, job);
+  return NextResponse.json({ ok: true });
 }
